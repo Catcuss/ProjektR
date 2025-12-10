@@ -1,0 +1,187 @@
+---
+title: "Analiza materiałów do superkondensatorów"
+author: "Maria Nowicka"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Podsumowanie całej analizy 
+Celem przeprowadzonej analizy była ocena właściwości materiałów grafenowych wykorzystywanych w elektrodach superkondensatorów oraz identyfikacja parametrów mających największy wpływ na ich pojemność właściwą. Analizowany zbiór obejmuje 925 obserwacji i 21 atrybutów, opisujących zarówno parametry elektrochemiczne i warunki testowe, jak i cechy strukturalne badanych materiałów.
+
+Dane zostały poddane wstępnemu przygotowaniu: kolumny oczyszczono i ujednolicono, wartości liczbowe skonwertowano do odpowiednich typów, a brakujące dane wypełniono medianą, co pozwala ograniczyć wpływ wartości odstających. Kluczowe zmienne takie jak pojemność, powierzchnia właściwa (SSA) i gęstość prądu wykazywały znaczną zmienność. Pojemność materiałów wahała się od 1.4 F/g do 3344 F/g, co odzwierciedla szeroki zakres technologii syntezy i różnice w strukturze analizowanych elektrod.
+
+Analiza rozkładów pokazała, że pojemność ma rozkład silnie skośny, z przewagą materiałów o niskich i średnich wartościach oraz nielicznymi przypadkami o bardzo wysokiej pojemności. W przypadku SSA większość materiałów skupia się w okolicach 160 m²/g, a tylko nieliczne przekraczają 1000 m²/g. Wartości gęstości prądu były bardzo zróżnicowane, dlatego zastosowanie skali logarytmicznej pozwoliło uwidocznić typowe, często stosowane zakresy testowe.
+
+Analiza korelacji wykazała, że SSA oraz pojemność są dodatnio skorelowane, materiały o większej powierzchni właściwej wykazują lepsze właściwości magazynowania ładunku. Objętość porów (pore volume) nie wykazywała silnej korelacji z pojemnością, co sugeruje, że sama objętość mikroporów nie jest wystarczającym predyktorem wydajności. Zawartość pierwiastków takich jak N, C i O również nie wykazała liniowej zależności z pojemnością, co wskazuje na bardziej złożoną, nieliniową naturę oddziaływań chemicznych.
+Interaktywny wykres SSA vs. pojemność potwierdził jasną tendencję wzrostową, materiały o większej powierzchni właściwej zwykle osiągają większą pojemność, jednak zależność ta jest dodatkowo modulowana przez gęstość prądu.
+
+## Predykcja
+
+Do przewidywania pojemności opracowano model Random Forest, który wykorzystał wybrane cechy strukturalne i testowe. Model uzyskał około 25% wyjaśnionej wariancji oraz dość wysoki błąd MSE, co sugeruje wysoki poziom szumu w danych oraz złożoność rzeczywistych zależności między parametrami materiałów.
+Metody XAI (feature importance i SHAP) potwierdziły, że najważniejszą zmienną pozostaje SSA, zgodnie z wynikami analizy korelacji. Istotny wpływ wykazały także gęstość prądu oraz objętość porów. Analiza wartości SHAP pokazała, że efekty zmiennych mają charakter addytywny, ale ich działanie jest zróżnicowane w zależności od konkretnej obserwacji,  co sugeruje nieliniową naturę problemu.
+
+## Kluczowe wnioski
+
+Powierzchnia właściwa (SSA) jest najistotniejszym czynnikiem determinującym pojemność superkondensatora, co potwierdzono za pomocą statystyk opisowych, korelacji i modelu predykcyjnego.
+
+Dane literaturowe charakteryzują się dużą zmiennością, co obniża dokładność modeli predykcyjnych, ale jednocześnie odzwierciedla różnorodność metod syntezy i struktury materiałów.
+
+Gęstość prądu znacząco wpływa na obserwowaną pojemność materiały testowane przy niskich wartościach osiągają lepsze wyniki, dlatego parametr ten należy zawsze uwzględniać przy porównaniach.
+
+Zawartości N, C i O nie wykazują silnych zależności liniowych z pojemnością, co wskazuje, że w analizie tego typu materiałów konieczne mogą być modele nieliniowe lub dodatkowe zmienne chemiczne.
+
+Modele uczenia maszynowego mają potencjał, lecz wymagają rozszerzonego zestawu danych, lepszej standaryzacji warunków eksperymentalnych i możliwego podziału na klasy materiałów
+
+```{r libraries and seed, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(tidyr)
+library(readr)
+library(GGally)   
+library(plotly)       
+library(randomForest)
+library(DALEX)        
+library(janitor)    
+library(corrplot)
+
+
+set.seed(123)
+```
+---
+# Wczytywanie danych
+Dane importowane są z pliku "data.csv". Dla ułatwienia nazwy kolumn zostają oczyszczone ze spacji i znaków specjalnych, a wszystkie litery zmienione na małe.
+
+```{r loading data, include=TRUE}
+data <- read_csv("data.csv", show_col_types = FALSE)
+data <- data %>% clean_names()
+colnames(data)[1:10]
+```
+# Przetwarzanie brakujących danych 
+Kluczowe dane konwertowane są na liczby, a następnie, jeśli to możliwe brakujące wartości zastępowane są medianą, ponieważ jest ona odporna na wartości odstające. Wiersze bez zmiennej celowej są usuwane.
+```{r missing data, include=TRUE}
+data_clean <- data %>%
+  mutate(
+    capacitance_f_g = as.numeric(capacitance_f_g),
+    specific_surface_area_m_2_g = as.numeric(specific_surface_area_m_2_g),
+    current_density_a_g = as.numeric(current_density_a_g)
+  ) %>%
+  mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
+  filter(!is.na(capacitance_f_g))
+
+n_rows <- nrow(data_clean)
+n_cols <- ncol(data_clean)
+
+cat("Liczba wierszy:", n_rows, "\nLiczba kolumn:", n_cols, "\n")
+
+data_clean %>%
+  select(capacitance_f_g, specific_surface_area_m_2_g, current_density_a_g) %>%
+  summary() %>%
+  kable()
+```
+# Analiza rozkładów
+Wykresy prezentują najważniejsze parametry: pojemność, powierzchnię właściwą oraz gęstość prądu w skali logarytmicznej dla lepszej czytelności danych.
+```{r analisys, include=TRUE}
+ggplot(data_clean, aes(x = capacitance_f_g)) +
+  geom_histogram(bins = 30, fill = "blue", color = "white") +
+  theme_minimal() +
+  labs(title = "Rozkład Pojemności", x = "Capacitance (F/g)")
+
+ggplot(data_clean, aes(x = specific_surface_area_m_2_g)) +
+  geom_histogram(bins = 30, fill = "green", color = "white") +
+  theme_minimal() +
+  labs(title = "Rozkład SSA", x = "Specific Surface Area (m^2/g)")
+
+ggplot(data_clean, aes(x = current_density_a_g)) +
+  geom_histogram(bins = 30, fill = "red", color = "white") +
+  scale_x_log10() +
+  theme_minimal() +
+  labs(title = "Rozkład Gęstości Prądu (log)", x = "Current Density (A/g)")
+```
+
+# Korelacja parametrów
+Macierz korelacji obrazuje siłę i kierunek zależności między wybranymi parametrami fizykochemicznymi a wydajnością elektrod.
+```{r correlations, include=TRUE}
+
+numeric_data <- data_clean %>%
+  select(
+    capacitance_f_g, 
+    specific_surface_area_m_2_g, 
+    current_density_a_g, 
+    pore_volume_cm_3_g, 
+    n_at_percent, 
+    c_at_percent, 
+    o_at_percent,
+    potential_window_v
+  ) %>%
+  rename(
+    "Pojemnosc" = capacitance_f_g,
+    "SSA" = specific_surface_area_m_2_g,
+    "Gestosc_Pradu" = current_density_a_g,
+    "Objetosc_Porow" = pore_volume_cm_3_g,
+    "Azot_N%" = n_at_percent,
+    "Wegiel_C%" = c_at_percent,
+    "Tlen_O%" = o_at_percent,
+    "Okno_Potencjalowe" = potential_window_v
+  )
+
+M <- cor(numeric_data, use = "complete.obs")
+
+corrplot(M, 
+         method = "color",       
+         type = "upper",         
+         order = "hclust",       
+         addCoef.col = "black",   
+         tl.col = "black",       
+         tl.srt = 45,             
+         number.cex = 0.7,       
+         diag = FALSE,    
+         col = colorRampPalette(c("red", "white", "green"))(200) 
+)
+```
+
+# Interaktywne wykresy 
+Wykresy pozwalają na badanie relacji między powierzchnią właściwą a pojemnością z uwzględnieniem gęstości prądu (kolor punktu), co umożliwia identyfikację trendów i anomalii danych.   
+```{r charts, include=TRUE}
+plot_interactive <- ggplot(data_clean, aes(x = specific_surface_area_m_2_g, 
+                                           y = capacitance_f_g,
+                                           color = current_density_a_g)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Zależność SSA vs Pojemność", x = "SSA (m^2/g)", y = "Pojemność (F/g)")
+
+ggplotly(plot_interactive)
+```
+# Model predykcji i XAI
+Zbudowano model Random Forest do przewidywania pojemności materiału. Zastosowano metody wyjaśnialnej sztucznej inteligencji (XAI), w tym analizę ważności cech oraz wartości SHAP dla przykładowej obserwacji.
+```{r prediction model, include=TRUE}
+model_data <- data_clean %>%
+  select(capacitance_f_g, specific_surface_area_m_2_g, current_density_a_g, 
+         pore_volume_cm_3_g, n_at_percent, o_at_percent)
+
+model_rf <- randomForest(capacitance_f_g ~ ., data = model_data, importance = TRUE, ntree = 100)
+
+print(model_rf)
+explainer <- explain(
+  model = model_rf,
+  data = model_data %>% select(-capacitance_f_g),
+  y = model_data$capacitance_f_g,
+  label = "Random Forest",
+  verbose = FALSE
+)
+
+vip <- model_parts(explainer)
+plot(vip) + ggtitle("Ważność cech w modelu")
+
+shap_values <- predict_parts(explainer, new_observation = model_data[1, ], type = "shap")
+plot(shap_values) + ggtitle("Wartości SHAP dla pierwszej obserwacji")
+ 
+```
